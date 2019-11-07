@@ -3,7 +3,6 @@ import os.path as path
 import json
 import torch
 import torch.utils.data as data
-import numpy as np
 import random
 from PIL import Image
 import pdb
@@ -59,7 +58,7 @@ class Imagefolder_csv(object):
 
 	def __init__(self, data_dir="", mode="train", image_size=84, data_name="miniImageNet",
 				 transform=None, loader=default_loader, gray_loader=gray_loader, 
-				 episode_num=1000, way_num=5, shot_num=5, query_num=5):
+				 episode_num=1000, way_num=5, shot_num=1, query_num=5):
 		
 		super(Imagefolder_csv, self).__init__()
 
@@ -251,12 +250,12 @@ class Imagefolder_csv(object):
 		image_size = self.image_size
 		episode_files = self.data_list[index]
 
-		query_images = []
-		query_targets = []
-		support_images = []
-		support_targets = []
+		query_images = torch.zeros([0, 3, 84, 84])
+		query_targets = torch.zeros([0], dtype=torch.long)
+		support_images = torch.zeros([0, 3, 84, 84])
+		support_targets = torch.zeros([0], dtype=torch.long)
 
-		# 각 에피소드마다
+		# 각 클래스마다
 		for i in range(len(episode_files)):
 			data_files = episode_files[i]
 
@@ -270,34 +269,23 @@ class Imagefolder_csv(object):
 				# Normalization
 				if self.transform is not None:
 					temp_img = self.transform(temp_img)
-				query_images.append(temp_img)
+				query_images = torch.cat([query_images, temp_img.view(1, 3, 84, 84)], dim=0)
 
 
 			# load support images
-			temp_support = []
 			support_dir = data_files['support_set']
-			# 각 서포트 클래스의 이미지들마다
-			# len(support_dir) = shot_num (1 or 5)
-			for j in range(len(support_dir)): 
-				temp_img = self.loader(support_dir[j])
+			temp_img = self.loader(support_dir[0])
 
-				# Normalization
-				# temp_img = 3*84*84
-				if self.transform is not None:
-					temp_img = self.transform(temp_img)
-				temp_support.append(temp_img)
-
-			support_images.append(temp_support)
+			# Normalization
+			# temp_img = 3*84*84
+			if self.transform is not None:
+				temp_img = self.transform(temp_img)
+			support_images = torch.cat([support_images, temp_img.view(1, 3, 84, 84)], dim=0)
 
 			# read the label
-			target = data_files['target']
-			query_targets.extend(np.tile(target, len(query_dir)))
-			support_targets.extend(np.tile(target, len(support_dir)))
-
-		# Shuffle the query images 
-		rand_num = torch.rand(1)
-		random.Random(rand_num).shuffle(query_images)
-		random.Random(rand_num).shuffle(query_targets)
+			target = torch.tensor([data_files['target']], dtype=torch.long)
+			query_targets = torch.cat([query_targets, target.expand(len(query_dir))], dim=0)
+			support_targets = torch.cat([support_targets, target.expand(len(support_dir))], dim=0)
 
 		# print('__getitem__', time.time() - sttime)
 

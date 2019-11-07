@@ -38,13 +38,17 @@ from torch import autograd
 from PIL import ImageFile
 from PIL import Image
 import pdb
+import shutil
 
-from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 
 train_summary = SummaryWriter('runs/train')
 val_summary = SummaryWriter('runs/val')
 test_summary = SummaryWriter('runs/test')
 
+shutil.copy2('./train.py', './runs/train.py')
+shutil.copy2('./models/network.py', './runs/network.py')
+shutil.copy2('./dataset/datasets_csv.py', './runs/datasets_csv.py')
 
 # ============================ Data & Networks =====================================
 from dataset.datasets_csv import Imagefolder_csv
@@ -66,10 +70,10 @@ parser.add_argument('--workers', type=int, default=32)
 parser.add_argument('--imageSize', type=int, default=84)
 parser.add_argument('--episodeSize', type=int, default=1, help='the mini-batch size of training')
 parser.add_argument('--testepisodeSize', type=int, default=1, help='one episode is taken as a mini-batch')
-parser.add_argument('--epochs', type=int, default=300, help='the total number of training epoch')
+parser.add_argument('--epochs', type=int, default=10000, help='the total number of training epoch')
 parser.add_argument('--episode_train_num', type=int, default=1000, help='the total number of training episodes')
-parser.add_argument('--episode_val_num', type=int, default=300, help='the total number of evaluation episodes')
-parser.add_argument('--episode_test_num', type=int, default=300, help='the total number of testing episodes')
+parser.add_argument('--episode_val_num', type=int, default=100, help='the total number of evaluation episodes')
+parser.add_argument('--episode_test_num', type=int, default=100, help='the total number of testing episodes')
 parser.add_argument('--way_num', type=int, default=5, help='the number of way/class')
 parser.add_argument('--shot_num', type=int, default=1, help='the number of shot')
 parser.add_argument('--query_num', type=int, default=15, help='the number of queries')
@@ -81,11 +85,9 @@ parser.add_argument('--ngpu', type=int, default=1, help='the number of gpus')
 parser.add_argument('--nc', type=int, default=3, help='input image channels')
 parser.add_argument('--clamp_lower', type=float, default=-0.01)
 parser.add_argument('--clamp_upper', type=float, default=0.01)
-parser.add_argument('--print_freq', '-p', default=10, type=int, metavar='N', help='print frequency (default: 100)')
+parser.add_argument('--print_freq', '-p', default=100, type=int, metavar='N', help='print frequency (default: 100)')
 opt = parser.parse_args()
 
-opt.episodeSize *= opt.ngpu
-opt.episode_train_num *= opt.ngpu
 opt.cuda = True
 cudnn.benchmark = True
 
@@ -93,11 +95,22 @@ cudnn.benchmark = True
 
 # ======================================= Define functions =============================================
 
-def adjust_learning_rate(optimizer, epoch_num):
-	"""Sets the learning rate to the initial LR decayed by 0.05 every 10 epochs"""
-	lr = opt.lr * (0.05 ** (epoch_num // 10))
+def adjust_learning_rate(optimizer, epoch_num, best_prec1):
+
+	lr = opt.lr * (0.1 ** (epoch_num // 100))
+
+	# lr = opt.lr
+	# if best_prec1 < 40.0:
+	# 	lr = opt.lr
+	# elif best_prec1 < 45.0:
+	# 	lr = opt.lr * 0.1
+	# else:
+	# 	lr = opt.lr * 0.01
+
 	for param_group in optimizer.param_groups:
 		param_group['lr'] = lr
+	
+	return lr
 
 
 def train(train_loader, model, criterion, optimizer, epoch_index, F_txt):
@@ -106,34 +119,24 @@ def train(train_loader, model, criterion, optimizer, epoch_index, F_txt):
 	losses = AverageMeter()
 	top1 = AverageMeter()
 
+	model.train()
 
 	end = time.time()
 	for episode_index, (query_images, query_targets, support_images, support_targets) in enumerate(train_loader):
 
 		sttime = time.time()
 		
-		niter = epoch_index * len(train_loader) + episode_index
+		niter = epoch_index * opt.episode_train_num + episode_index
 
 		# Measure data loading time
 		data_time.update(time.time() - end)
 
 		# Convert query and support images
-		query_images = torch.cat(query_images, 0)
 		input_var1 = query_images.cuda()
-
-		model.shot_num = opt.shot_num
-		input_var2 = []
-		# len(support_images) = 5
-		for i in range(len(support_images)):
-			temp_support = support_images[i]
-			# len(temp_support) = shot_num
-			temp_support = torch.cat(temp_support, 0)
-			# shot_num, 3, 84, 84
-			temp_support = temp_support.cuda()
-			input_var2.append(temp_support)
+		input_var2 = support_images.cuda()
 
 		# Deal with the targets
-		target = torch.cat(query_targets, 0).cuda()
+		target = query_targets.view(-1).cuda()
 
 		# print('before model', time.time() - sttime)
 
@@ -142,6 +145,7 @@ def train(train_loader, model, criterion, optimizer, epoch_index, F_txt):
 		# input_var2 = 선택지
 		sttime = time.time()
 		output = model(input_var1, input_var2)
+		# print(output[0])
 		# print('model', time.time() - sttime)
 
 		sttime = time.time()
@@ -164,40 +168,44 @@ def train(train_loader, model, criterion, optimizer, epoch_index, F_txt):
 		# print('after model', time.time() - sttime)
 
 		#============== print the intermediate results ==============#
-		if episode_index % opt.print_freq == 0 and episode_index != 0:
 
-			train_summary.add_scalar('loss/Loss', losses.val, niter)
-			train_summary.add_scalar('loss/Prec@1', top1.val, niter)
+		save_image = True
+		if episode_index % opt.print_freq == 0:
 
-			mask = model.mask1.clone().detach().view(-1, 1, 21, 21).expand(-1, 3, 21, 21).cuda()
-			image = query_images.clone().detach().cuda()
-
-			mask = mask.repeat_interleave(4, dim=2)
-			mask = mask.repeat_interleave(4, dim=3)
-
-			maskedimage = vutils.make_grid(mask * image, nrow=15, normalize=True).cpu()
-			train_summary.add_image('visualize/maskedimage', maskedimage, niter)
-
-			mask = vutils.make_grid(mask, nrow=15, normalize=True).cpu()
-			train_summary.add_image('visualize/mask', mask, niter)
-
-			image = vutils.make_grid(image, nrow=15, normalize=True).cpu()
-			train_summary.add_image('visualize/image', image, niter)
-
-			print('Eposide-({0}): [{1}/{2}]\t'
+			print('Epoch-({0:4d}): [{1:4d}/{2:4d}]\t'
+				'LR {lr:.8f}\t'
 				'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
 				'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
 				'Loss {loss.val:.3f} ({loss.avg:.3f})\t'
 				'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
-					epoch_index, episode_index, len(train_loader), batch_time=batch_time, data_time=data_time, loss=losses, top1=top1))
+					epoch_index, episode_index, len(train_loader), lr=optimizer.param_groups[0]['lr'], batch_time=batch_time, data_time=data_time, loss=losses, top1=top1))
 
-			print('Eposide-({0}): [{1}/{2}]\t'
+			print('Epoch-({0:4d}): [{1:4d}/{2:4d}]\t'
+				'LR {lr:.8f}\t'
 				'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
 				'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
 				'Loss {loss.val:.3f} ({loss.avg:.3f})\t'
 				'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
-					epoch_index, episode_index, len(train_loader), batch_time=batch_time, data_time=data_time, loss=losses, top1=top1), file=F_txt)
+					epoch_index, episode_index, len(train_loader), lr=optimizer.param_groups[0]['lr'], batch_time=batch_time, data_time=data_time, loss=losses, top1=top1), file=F_txt)
 
+	train_summary.add_scalar('loss/Loss', losses.avg, epoch_index)
+	train_summary.add_scalar('loss/Prec@1', top1.avg, epoch_index)
+
+	if save_image:
+		mask = model.mask1.clone().detach().view(-1, 1, 21, 21).expand(-1, 3, 21, 21).cuda()
+		image = query_images.clone().detach().view(-1, 3, 84, 84).cuda()
+
+		mask = mask.repeat_interleave(4, dim=2)
+		mask = mask.repeat_interleave(4, dim=3)
+		
+		maskedimage = vutils.make_grid(mask * image, nrow=15, normalize=True).cpu()
+		train_summary.add_image('visualize/maskedimage', maskedimage, epoch_index)
+
+		mask = vutils.make_grid(mask, nrow=15, normalize=True).cpu()
+		train_summary.add_image('visualize/mask', mask, epoch_index)
+
+		image = vutils.make_grid(image, nrow=15, normalize=True).cpu()
+		train_summary.add_image('visualize/image', image, epoch_index)
 
 
 def validate(val_loader, model, criterion, epoch_index, best_prec1, F_txt):
@@ -205,38 +213,23 @@ def validate(val_loader, model, criterion, epoch_index, best_prec1, F_txt):
 	losses = AverageMeter()
 	top1 = AverageMeter()
   
-
 	# switch to evaluate mode
 	model.eval()
 	accuracies = []
 
-
 	end = time.time()
 	for episode_index, (query_images, query_targets, support_images, support_targets) in enumerate(val_loader):
 
-		# niter = epoch_index * len(train_loader) + episode_index
-
 		# Convert query and support images
-		query_images = torch.cat(query_images, 0)
 		input_var1 = query_images.cuda()
-
-
-		input_var2 = []
-		for i in range(len(support_images)):
-			temp_support = support_images[i]
-			temp_support = torch.cat(temp_support, 0)
-			temp_support = temp_support.cuda()
-			input_var2.append(temp_support)
-
+		input_var2 = support_images.cuda()
 
 		# Deal with the targets
-		target = torch.cat(query_targets, 0)
-		target = target.cuda()
+		target = query_targets.view(-1).cuda()
 
 		# Calculate the output 
 		output = model(input_var1, input_var2)
 		loss = criterion(output, target)
-
 
 		# measure accuracy and record loss
 		prec1, _ = accuracy(output, target, topk=(1, 3))
@@ -266,8 +259,8 @@ def validate(val_loader, model, criterion, epoch_index, best_prec1, F_txt):
 					epoch_index, episode_index, len(val_loader), batch_time=batch_time, loss=losses, top1=top1), file=F_txt)
 
 
-	val_summary.add_scalar('loss/Loss', losses.avg, (epoch_index + 1) * len(train_loader))
-	val_summary.add_scalar('loss/Prec@1', top1.avg, (epoch_index + 1) * len(train_loader))
+	val_summary.add_scalar('loss/Loss', losses.avg, epoch_index)
+	val_summary.add_scalar('loss/Prec@1', top1.avg, epoch_index)
 
 	print(' * Prec@1 {top1.avg:.3f} Best_prec1 {best_prec1:.3f}'.format(top1=top1, best_prec1=best_prec1))
 	print(' * Prec@1 {top1.avg:.3f} Best_prec1 {best_prec1:.3f}'.format(top1=top1, best_prec1=best_prec1), file=F_txt)
@@ -298,7 +291,7 @@ class AverageMeter(object):
 		self.avg = self.sum / self.count
 
 
-def accuracy(output, target, topk=(1,)):
+def accuracy(output, target, pred=None, topk=(1,)):
 	"""Computes the precision@k for the specified values of k"""
 	with torch.no_grad():
 		maxk = max(topk)
@@ -384,7 +377,7 @@ for epoch_item in range(resume_epoch, opt.epochs):
 	
 	print('===================================== Epoch %d =====================================' %epoch_item)
 	print('===================================== Epoch %d =====================================' %epoch_item, file=F_txt)
-	adjust_learning_rate(optimizer, epoch_item) 
+	adjust_learning_rate(optimizer, epoch_item, best_prec1) 
 	
 
 	# ======================================= Folder of Datasets =======================================
@@ -434,19 +427,17 @@ for epoch_item in range(resume_epoch, opt.epochs):
 
 	# ============================================ Training ===========================================
 	# Fix the parameters of Batch Normalization after 10000 episodes (1 epoch)
-	if epoch_item < 1:
-		model.train()
-	else:
-		model.eval()
 
 	st_time = time.time()
 	# Train for 10000 episodes in each epoch
+	model.train()
 	train(train_loader, model, criterion, optimizer, epoch_item, F_txt)
 
 
 	# =========================================== Evaluation ==========================================
 	print('============ Validation on the val set ============')
 	print('============ validation on the val set ============', file=F_txt)
+	model.eval()
 	prec1, _ = validate(val_loader, model, criterion, epoch_item, best_prec1, F_txt)
 
 
