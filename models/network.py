@@ -112,16 +112,16 @@ def print_network(net):
 	print(net)
 	print('Total number of parameters: %d' % num_params)
 
-class Gaussian(nn.Module):
-	def __init__(self, norm_layer=nn.BatchNorm2d):
-		super(Gaussian, self).__init__()
+class FourLayer_64F(nn.Module):
+	def __init__(self, norm_layer=nn.BatchNorm2d, num_classes=5, neighbor_k=3):
+		super(FourLayer_64F, self).__init__()
 
 		if type(norm_layer) == functools.partial:
 			use_bias = norm_layer.func == nn.InstanceNorm2d
 		else:
 			use_bias = norm_layer == nn.InstanceNorm2d
 
-		self.feature = nn.Sequential(# 64x21x21
+		self.gaussian_feature = nn.Sequential(# 64x21x21
 			nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, bias=use_bias),
 			norm_layer(64),
 			nn.LeakyReLU(0.2, False),
@@ -151,50 +151,6 @@ class Gaussian(nn.Module):
 		self.scalex_fc = nn.Linear(64, 6)
 		self.scaley_fc = nn.Linear(64, 6)
 		self.theta_fc = nn.Linear(64, 6)
-	
-	def forward(self, input):
-		input = self.feature(input)
-
-		mi = self.mi_deconv(input) # B*1*21*21
-		mi = mi.reshape(-1, 21 * 21) # B*441
-		mi = F.softmax(mi, dim=1) # B*441
-
-		idx = torch.argmax(mi, dim=1) # B
-
-		mi = torch.stack([idx // 21, idx % 21], dim=1) # B*2
-		mi = (mi - 10.0) * 0.1 # B*2
-
-		x = self.scalex_fc(input.reshape(-1, 64)) # B*6
-		x = F.softmax(x, dim=1) # B*6
-		x = torch.argmax(x, dim=1) / 5.0
-
-		y = self.scaley_fc(input.reshape(-1, 64)) # B*6
-		y = F.softmax(y, dim=1) # B*6
-		y = torch.argmax(y, dim=1) / 5.0
-
-		theta = self.theta_fc(input.reshape(-1, 64)) # B*6
-		theta = F.softmax(theta, dim=1) # B*6
-		theta = torch.argmax(theta, dim=1) * math.pi / 6.0
-		sintheta = torch.sin(theta)
-		costheta = torch.cos(theta)
-		rot_mat = torch.stack([costheta, (-1.0) * sintheta, sintheta, costheta], dim=1).reshape(-1, 2, 2)
-
-		sigma_divide = 4.0
-		sigma_add = 0.1
-		sigma = torch.stack([x / sigma_divide + sigma_add, torch.zeros(x.shape[0]).cuda(), torch.zeros(x.shape[0]).cuda(), y / sigma_divide + sigma_add], dim=1).reshape(-1, 2, 2)
-
-		sigma = rot_mat @ sigma @ rot_mat.transpose(1, 2)
-
-		return mi, sigma
-
-class FourLayer_64F(nn.Module):
-	def __init__(self, norm_layer=nn.BatchNorm2d, num_classes=5, neighbor_k=3):
-		super(FourLayer_64F, self).__init__()
-
-		if type(norm_layer) == functools.partial:
-			use_bias = norm_layer.func == nn.InstanceNorm2d
-		else:
-			use_bias = norm_layer == nn.InstanceNorm2d
 
 		self.features = nn.Sequential(                              # 3*84*84
 			nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=use_bias),
@@ -231,10 +187,6 @@ class FourLayer_64F(nn.Module):
 			nn.Softmax(dim=1),
 		)
 
-		self.gaussian = Gaussian()
-		
-		self.imgtoclass = ImgtoClass_Metric(neighbor_k=neighbor_k)  # 1*num_classes
-
 		self.coord = torch.zeros([21, 21, 2]).cuda()
 		# -1.0 ~ 1.0
 		for x in range(0, 21):
@@ -247,9 +199,42 @@ class FourLayer_64F(nn.Module):
 
 		# self.coord = (torch.stack([torch.arange(21).cuda().view(21, 1).expand(21, 21), torch.arange(21).cuda().view(21, 1).expand(21, 21)], dim=2) - 10.0) * 0.1
 
-		mi, sigma = self.gaussian(descriptor)
+		## get mi & theta
+		input = self.gaussian_feature(descriptor)
+
+		mi = self.mi_deconv(input) # B*1*21*21
+		mi = mi.reshape(-1, 21 * 21) # B*441
+		mi = F.softmax(mi, dim=1) # B*441
+
+		idx = torch.argmax(mi, dim=1) # B
+
+		mi = torch.stack([idx // 21, idx % 21], dim=-1) # B*2
+		mi = (mi - 10.0) * 0.1 # B*2
+
+		x = self.scalex_fc(input.reshape(-1, 64)) # B*6
+		x = F.softmax(x, dim=1) # B*6
+		x = torch.argmax(x, dim=1) / 5.0
+
+		y = self.scaley_fc(input.reshape(-1, 64)) # B*6
+		y = F.softmax(y, dim=1) # B*6
+		y = torch.argmax(y, dim=1) / 5.0
+
+		theta = self.theta_fc(input.reshape(-1, 64)) # B*6
+		theta = F.softmax(theta, dim=1) # B*6
+		theta = torch.argmax(theta, dim=1) * math.pi / 6.0
+		sintheta = torch.sin(theta)
+		costheta = torch.cos(theta)
+		rot_mat = torch.stack([costheta, (-1.0) * sintheta, sintheta, costheta], dim=1).reshape(-1, 2, 2)
+
+
+		# making sigma
+		sigma_divide = 2.0
+		sigma_add = 0.1
+		sigma = torch.stack([x / sigma_divide + sigma_add, torch.zeros(x.shape[0]).cuda(), torch.zeros(x.shape[0]).cuda(), y / sigma_divide + sigma_add], dim=1).reshape(-1, 2, 2)
+
+		sigma = rot_mat @ sigma @ rot_mat.transpose(1, 2)
 		
-		# multlivariate gaussian
+		# making mask
 		val = self.coord.reshape(-1, 21, 21, 2, 1).expand(mi.shape[0], 21, 21, 2, 1) - mi.reshape(-1, 1, 1, 2, 1).expand(-1, 21, 21, 2, 1)
 		mask = torch.exp(-0.5 * val.transpose(-2, -1) @ torch.inverse(sigma).reshape(-1, 1, 1, 2, 2).expand(-1, 21, 21, 2, 2) @ val)
 		mask = mask.reshape(-1, 21, 21)
@@ -258,112 +243,53 @@ class FourLayer_64F(nn.Module):
 		return mask
 
 	def forward(self, input1, input2):
-		# torch.set_printoptions(edgeitems=21)
-		# np.set_printoptions(linewidth=np.inf)
-		# np.set_printoptions(precision=4)
-		# np.set_printoptions(suppress=True)
 
-		input1 = input1.view(-1, 3, 84, 84)
-		input2 = input2.view(-1, 3, 84, 84)
+		# input1 : (B, query_num, 3, 84, 84)
+		# input2 : (B, 5, 3, 84, 84)
 
 		sttime = time.time()
 
+		B, B1, _, _, _ = input1.shape
+		B, B2, _, _, _ = input2.shape
+
 		# extract features of input1--query image
-		q = self.features(input1)
-		self.mask1 = self.get_mask(q)
+		input1 = self.features(input1.reshape(-1, 3, 84, 84))
+		self.mask1 = self.get_mask(input1)
+		input1 = input1.reshape(B, B1, 64, 21, 21)
+		self.mask1 = self.mask1.reshape(B, B1, 21, 21)
 
 		# extract features of input2--support set
-		support_set_sam = self.features(input2)
-		# 5, 64, 21, 21
-		_, C, h, w = support_set_sam.size()
+		input2 = self.features(input2.reshape(-1, 3, 84, 84))
+		self.mask2 = self.get_mask(input2)
+		input2 = input2.reshape(B, B2, 64, 21, 21)
+		self.mask2 = self.mask2.reshape(B, B2, 21, 21)
 
-		self.mask2 = self.get_mask(support_set_sam)
+		####### image to class #######
+		input1 = input1.reshape(B, B1, 64, 21 * 21)
+		input2 = input2.reshape(B, B2, 64, 21 * 21)
 
-		x = self.imgtoclass(q, support_set_sam, self.mask1, self.mask2) # get Batch*num_classes
-		
-		x = self.score_fc(x)
+		self.mask1 = self.mask1.reshape(B, B1, 1, 21 * 21, 1).expand(B, B1, B2, 21 * 21, 21 * 21)
+		self.mask2 = self.mask2.reshape(B, 1, B2, 1, 21 * 21).expand(B, B1, B2, 21 * 21, 21 * 21)
 
-		# print('FourLayer_64F', time.time() - sttime)
-		return x
+		input1 = input1.reshape(B, B1, 1, 64, 21 * 21).expand(B, B1, B2, 64, 21 * 21).transpose(-2, -1).reshape(B * B1 * B2, 441, 64)
+		input2 = input2.reshape(B, 1, B2, 64, 21 * 21).expand(B, B1, B2, 64, 21 * 21).reshape(B * B1 * B2, 64, 441)
 
+		input1_norm = torch.norm(input1, 2, dim=-1, keepdim=True)
+		input2_norm = torch.norm(input2, 2, dim=-2, keepdim=True)
 
+		innerproduct_matrix = torch.matmul(input1, input2) / torch.matmul(input1_norm, input2_norm)
+		innerproduct_matrix = innerproduct_matrix.reshape(B, B1, B2, 441, 441)
 
-#========================== Define an image-to-class layer ==========================#
+		masked_innerproduct_matrix = innerproduct_matrix * self.mask1 * self.mask2
 
+		topk_value, _ = torch.topk(masked_innerproduct_matrix, 3, -1)
 
-class ImgtoClass_Metric(nn.Module):
-	def __init__(self, neighbor_k=3):
-		super(ImgtoClass_Metric, self).__init__()
-		self.neighbor_k = neighbor_k
-
-	# Calculate the k-Nearest Neighbor of each local descriptor 
-	def cal_cosinesimilarity(self, input1, input2, mask1, mask2):
-		# input1 = 쿼리
-		# input2 = 선택지
-		# 75*64*21*21
-		B1, C, _, _ = input1.shape
-		# 5*64*21*21
-		B2, C, _, _ = input2.shape
-
-		# B1*64*441
-		input1 = input1.reshape(B1, 64, 21 * 21)
-		# B2*64*441
-		input2 = input2.reshape(B2, 64, 21 * 21)
-
-		# (B1*B2)*441*441
-		mask1 = mask1.reshape(B1, 1, 21 * 21, 1).expand(B1, B2, 21 * 21, 21 * 21).reshape(B1 * B2, 21 * 21, 21 * 21)
-		mask2 = mask2.reshape(1, B2, 1, 21 * 21).expand(B1, B2, 21 * 21, 21 * 21).reshape(B1 * B2, 21 * 21, 21 * 21)
-
-		# (B1*B2)*441*64
-		query_sam = input1.reshape(B1, 1, 64, 21 * 21).expand(B1, B2, 64, 21 * 21).transpose(-2, -1).reshape(B1 * B2, 441, 64)
-		# (B1*B2)*64*441
-		support_set_sam = input2.reshape(1, B2, 64, 21 * 21).expand(B1, B2, 64, 21 * 21).reshape(B1 * B2, 64, 441)
-
-		# (B1*B2)*441*1
-		query_sam_norm = torch.norm(query_sam, 2, dim=-1, keepdim=True)
-		# (B1*B2)*1*441
-		support_set_sam_norm = torch.norm(support_set_sam, 2, dim=-2, keepdim=True)
-
-		# (B1*B2)*441*441
-		innerproduct_matrix = torch.matmul(query_sam, support_set_sam) / torch.matmul(query_sam_norm, support_set_sam_norm)
-
-		# My work : multiply the mark tensor
-		# (B1*B2)*441*441
-		masked_innerproduct_matrix = innerproduct_matrix * mask1 * mask2
-
-		# innerproduct_matrix = innerproduct_matrix.reshape(B1 * B2, -1)
-		# masked_innerproduct_matrix = masked_innerproduct_matrix.reshape(B1 * B2, -1)
-
-		# _, topk_index = torch.topk(masked_innerproduct_matrix, 441 * self.neighbor_k, -1)
-		# topk_value = innerproduct_matrix[torch.arange(B1 * B2).view(-1, 1).expand(-1, 441 * self.neighbor_k), topk_index.reshape(B1 * B2, 441 * self.neighbor_k)].reshape(B1 * B2, 441 * self.neighbor_k)
-		# topk_value = masked_innerproduct_matrix[torch.arange(B1 * B2).view(-1, 1).expand(-1, 441 * self.neighbor_k), topk_index.reshape(B1 * B2, 441 * self.neighbor_k)].reshape(B1 * B2, 441 * self.neighbor_k)
-
-		# (B1*B2)*441*3
-		topk_value, _ = torch.topk(masked_innerproduct_matrix, self.neighbor_k, -1)
-		# _, topk_index = torch.topk((mask1 * mask2).reshape(B1, B2, 441, 441), self.neighbor_k, -1)
-		# topk_value = self.batched_index_select(innerproduct_matrix.reshape(B1 * B2 * 441, -1), 1, topk_index.reshape(B1 * B2 * 441, -1)).reshape(B1 * B2, 441, 3)
-
-		# B1*B2
-		Similarity_list = torch.sum(topk_value.reshape(B1, B2, -1), dim=2)
+		Similarity_list = torch.sum(topk_value.reshape(B, B1, B2, -1), dim=-1)
 
 		# Similarity_list = F.softmax(Similarity_list, dim=1)
 
-		return Similarity_list
+		Similarity_list = self.score_fc(Similarity_list.reshape(B * B1, -1)).reshape(B, B1, -1)
 
-	def batched_index_select(self, input, dim, index):
-		views = [input.shape[0]] + [1 if i != dim else -1 for i in range(1, len(input.shape))]
-		expanse = list(input.shape)
-		expanse[0] = -1
-		expanse[dim] = -1
-		index = index.view(views).expand(expanse)
-		return torch.gather(input, dim, index)
-
-	def forward(self, x1, x2, mask1, mask2):
-		
-		sttime = time.time()
-
-		Similarity_list = self.cal_cosinesimilarity(x1, x2, mask1, mask2)
-
-		# print('ImgtoClass_Metric', time.time() - sttime)
+		# print('FourLayer_64F', time.time() - sttime)
 
 		return Similarity_list

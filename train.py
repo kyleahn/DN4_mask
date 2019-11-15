@@ -42,64 +42,13 @@ import shutil
 
 from torch.utils.tensorboard import SummaryWriter
 
-train_summary = SummaryWriter('runs/train')
-val_summary = SummaryWriter('runs/val')
-test_summary = SummaryWriter('runs/test')
-
-shutil.copy2('./train.py', './runs/train.py')
-shutil.copy2('./models/network.py', './runs/network.py')
-shutil.copy2('./dataset/datasets_csv.py', './runs/datasets_csv.py')
-
-# ============================ Data & Networks =====================================
-from dataset.datasets_csv import Imagefolder_csv
-import models.network as DN4Net
-# ==================================================================================
-
-
-ImageFile.LOAD_TRUNCATED_IMAGES = True
-
-parser = argparse.ArgumentParser()
-parser.add_argument('--dataset_dir', default='./datasets/miniImageNet', help='/miniImageNet')
-parser.add_argument('--data_name', default='miniImageNet', help='miniImageNet|StanfordDog|StanfordCar|CubBird')
-parser.add_argument('--mode', default='train', help='train|val|test')
-parser.add_argument('--outf', default='./results/DN4')
-parser.add_argument('--resume', default='', type=str, help='path to the lastest checkpoint (default: none)')
-parser.add_argument('--basemodel', default='Conv64F', help='Conv64F|ResNet256F')
-parser.add_argument('--workers', type=int, default=32)
-#  Few-shot parameters  #
-parser.add_argument('--imageSize', type=int, default=84)
-parser.add_argument('--episodeSize', type=int, default=1, help='the mini-batch size of training')
-parser.add_argument('--testepisodeSize', type=int, default=1, help='one episode is taken as a mini-batch')
-parser.add_argument('--epochs', type=int, default=10000, help='the total number of training epoch')
-parser.add_argument('--episode_train_num', type=int, default=1000, help='the total number of training episodes')
-parser.add_argument('--episode_val_num', type=int, default=100, help='the total number of evaluation episodes')
-parser.add_argument('--episode_test_num', type=int, default=100, help='the total number of testing episodes')
-parser.add_argument('--way_num', type=int, default=5, help='the number of way/class')
-parser.add_argument('--shot_num', type=int, default=1, help='the number of shot')
-parser.add_argument('--query_num', type=int, default=15, help='the number of queries')
-parser.add_argument('--neighbor_k', type=int, default=3, help='the number of k-nearest neighbors')
-parser.add_argument('--lr', type=float, default=0.005, help='learning rate, default=0.005')
-parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
-parser.add_argument('--cuda', action='store_true', default=True, help='enables cuda')
-parser.add_argument('--ngpu', type=int, default=1, help='the number of gpus')
-parser.add_argument('--nc', type=int, default=3, help='input image channels')
-parser.add_argument('--clamp_lower', type=float, default=-0.01)
-parser.add_argument('--clamp_upper', type=float, default=0.01)
-parser.add_argument('--print_freq', '-p', default=100, type=int, metavar='N', help='print frequency (default: 100)')
-opt = parser.parse_args()
-
-opt.cuda = True
-cudnn.benchmark = True
-
-
-
 # ======================================= Define functions =============================================
 
 def adjust_learning_rate(optimizer, epoch_num, best_prec1):
 
-	lr = opt.lr * (0.1 ** (epoch_num // 100))
+	# lr = opt.lr * (0.1 ** (epoch_num // 100))
 
-	# lr = opt.lr
+	lr = opt.lr
 	# if best_prec1 < 40.0:
 	# 	lr = opt.lr
 	# elif best_prec1 < 45.0:
@@ -122,7 +71,7 @@ def train(train_loader, model, criterion, optimizer, epoch_index, F_txt):
 	model.train()
 
 	end = time.time()
-	for episode_index, (query_images, query_targets, support_images, support_targets) in enumerate(train_loader):
+	for episode_index, (query_images, query_targets, support_images, _) in enumerate(train_loader):
 
 		sttime = time.time()
 		
@@ -141,11 +90,9 @@ def train(train_loader, model, criterion, optimizer, epoch_index, F_txt):
 		# print('before model', time.time() - sttime)
 
 		# Calculate the output
-		# input_var1 = 쿼리
-		# input_var2 = 선택지
 		sttime = time.time()
 		output = model(input_var1, input_var2)
-		# print(output[0])
+		output = output.reshape(-1, opt.way_num)
 		# print('model', time.time() - sttime)
 
 		sttime = time.time()
@@ -169,7 +116,6 @@ def train(train_loader, model, criterion, optimizer, epoch_index, F_txt):
 
 		#============== print the intermediate results ==============#
 
-		save_image = True
 		if episode_index % opt.print_freq == 0:
 
 			print('Epoch-({0:4d}): [{1:4d}/{2:4d}]\t'
@@ -191,20 +137,23 @@ def train(train_loader, model, criterion, optimizer, epoch_index, F_txt):
 	train_summary.add_scalar('loss/Loss', losses.avg, epoch_index)
 	train_summary.add_scalar('loss/Prec@1', top1.avg, epoch_index)
 
+	save_image = True
 	if save_image:
-		mask = model.mask1.clone().detach().view(-1, 1, 21, 21).expand(-1, 3, 21, 21).cuda()
-		image = query_images.clone().detach().view(-1, 3, 84, 84).cuda()
+		# torch.cuda.empty_cache()
+
+		mask = model.mask1.detach().reshape(-1, 1, 21, 21).expand(-1, 3, 21, 21).cpu()[:16, :, :, :]
+		image = query_images.detach().reshape(-1, 3, 84, 84).cpu()[:16, :, :, :]
 
 		mask = mask.repeat_interleave(4, dim=2)
 		mask = mask.repeat_interleave(4, dim=3)
 		
-		maskedimage = vutils.make_grid(mask * image, nrow=15, normalize=True).cpu()
+		maskedimage = vutils.make_grid(mask * image, nrow=8, normalize=True).cpu()
 		train_summary.add_image('visualize/maskedimage', maskedimage, epoch_index)
 
-		mask = vutils.make_grid(mask, nrow=15, normalize=True).cpu()
+		mask = vutils.make_grid(mask, nrow=8, normalize=True).cpu()
 		train_summary.add_image('visualize/mask', mask, epoch_index)
 
-		image = vutils.make_grid(image, nrow=15, normalize=True).cpu()
+		image = vutils.make_grid(image, nrow=8, normalize=True).cpu()
 		train_summary.add_image('visualize/image', image, epoch_index)
 
 
@@ -218,7 +167,7 @@ def validate(val_loader, model, criterion, epoch_index, best_prec1, F_txt):
 	accuracies = []
 
 	end = time.time()
-	for episode_index, (query_images, query_targets, support_images, support_targets) in enumerate(val_loader):
+	for episode_index, (query_images, query_targets, support_images, _) in enumerate(val_loader):
 
 		# Convert query and support images
 		input_var1 = query_images.cuda()
@@ -229,6 +178,7 @@ def validate(val_loader, model, criterion, epoch_index, best_prec1, F_txt):
 
 		# Calculate the output 
 		output = model(input_var1, input_var2)
+		output = output.reshape(-1, opt.way_num)
 		loss = criterion(output, target)
 
 		# measure accuracy and record loss
@@ -307,173 +257,213 @@ def accuracy(output, target, pred=None, topk=(1,)):
 			res.append(correct_k.mul_(100.0 / batch_size))
 		return res
 
-
-
-# ======================================== Settings of path ============================================
-# saving path
-opt.outf = opt.outf+'_'+opt.data_name+'_'+str(opt.basemodel)+'_'+str(opt.way_num)+'Way_'+str(opt.shot_num)+'Shot'+'_K'+str(opt.neighbor_k)
-
-if not os.path.exists(opt.outf):
-	os.makedirs(opt.outf)
-
-if torch.cuda.is_available() and not opt.cuda:
-	print("WARNING: You have a CUDA device, so you should probably run with --cuda")
-
-# save the opt and results to a txt file
-txt_save_path = os.path.join(opt.outf, 'opt_resutls.txt')
-F_txt = open(txt_save_path, 'a+')
-print(opt)
-print(opt, file=F_txt)
-
-
-
-# ========================================== Model Config ===============================================
-ngpu = int(opt.ngpu)
-global best_prec1, epoch_index
-best_prec1 = 0
-epoch_index = 0
-
-model = DN4Net.define_DN4Net(which_model=opt.basemodel, num_classes=opt.way_num, neighbor_k=opt.neighbor_k, norm='batch', 
-	init_type='normal', use_gpu=opt.cuda)
-
-# define loss function (criterion) and optimizer
-criterion = nn.CrossEntropyLoss().cuda()
-optimizer = optim.Adam(model.parameters(), lr=opt.lr, betas=(opt.beta1, 0.9))
-
-
-# optionally resume from a checkpoint
-resume_epoch = 0
-if opt.resume:
-	if os.path.isfile(opt.resume):
-		print("=> loading checkpoint '{}'".format(opt.resume))
-		checkpoint = torch.load(opt.resume)
-		epoch_index = checkpoint['epoch_index']
-		best_prec1 = checkpoint['best_prec1']
-		model.load_state_dict(checkpoint['state_dict'])
-		optimizer.load_state_dict(checkpoint['optimizer'])
-		print("=> loaded checkpoint '{}' (epoch {})".format(opt.resume, checkpoint['epoch_index']))
-		print("=> loaded checkpoint '{}' (epoch {})".format(opt.resume, checkpoint['epoch_index']), file=F_txt)
-
-		resume_epoch = checkpoint['epoch_index'] + 1
-	else:
-		print("=> no checkpoint found at '{}'".format(opt.resume))
-		print("=> no checkpoint found at '{}'".format(opt.resume), file=F_txt)
-
-if opt.ngpu > 1:
-	model = nn.DataParallel(model, range(opt.ngpu))
-
-# print the architecture of the network
-print(model) 
-print(model, file=F_txt) 
-
-
-
-
-# ======================================== Training phase ===============================================
-print('\n............Start training............\n')
-start_time = time.time()
-
-for epoch_item in range(resume_epoch, opt.epochs):
+if __name__ == '__main__':
 	
-	print('===================================== Epoch %d =====================================' %epoch_item)
-	print('===================================== Epoch %d =====================================' %epoch_item, file=F_txt)
-	adjust_learning_rate(optimizer, epoch_item, best_prec1) 
+	train_summary = SummaryWriter('runs/train')
+	val_summary = SummaryWriter('runs/val')
+	test_summary = SummaryWriter('runs/test')
+
+	shutil.copy2('./train.py', './runs/train.py')
+	shutil.copy2('./models/network.py', './runs/network.py')
+	shutil.copy2('./dataset/datasets_csv.py', './runs/datasets_csv.py')
+
+	# ============================ Data & Networks =====================================
+	from dataset.datasets_csv import Imagefolder_csv
+	import models.network as DN4Net
+	# ==================================================================================
+
+	ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+	parser = argparse.ArgumentParser()
+	parser.add_argument('--dataset_dir', default='./datasets/miniImageNet', help='/miniImageNet')
+	parser.add_argument('--data_name', default='miniImageNet', help='miniImageNet|StanfordDog|StanfordCar|CubBird')
+	parser.add_argument('--mode', default='train', help='train|val|test')
+	parser.add_argument('--outf', default='./results/DN4')
+	parser.add_argument('--resume', default='', type=str, help='path to the lastest checkpoint (default: none)')
+	parser.add_argument('--basemodel', default='Conv64F', help='Conv64F|ResNet256F')
+	parser.add_argument('--workers', type=int, default=64)
+	#  Few-shot parameters  #
+	parser.add_argument('--imageSize', type=int, default=84)
+	parser.add_argument('--episodeSize', type=int, default=12, help='the mini-batch size of training')
+	parser.add_argument('--testepisodeSize', type=int, default=12, help='one episode is taken as a mini-batch')
+	parser.add_argument('--epochs', type=int, default=10000, help='the total number of training epoch')
+	parser.add_argument('--episode_train_num', type=int, default=1000, help='the total number of training episodes')
+	parser.add_argument('--episode_val_num', type=int, default=200, help='the total number of evaluation episodes')
+	parser.add_argument('--episode_test_num', type=int, default=200, help='the total number of testing episodes')
+	parser.add_argument('--way_num', type=int, default=5, help='the number of way/class')
+	parser.add_argument('--shot_num', type=int, default=1, help='the number of shot')
+	parser.add_argument('--query_num', type=int, default=3, help='the number of queries')
+	parser.add_argument('--neighbor_k', type=int, default=3, help='the number of k-nearest neighbors')
+	parser.add_argument('--lr', type=float, default=0.005, help='learning rate, default=0.005')
+	parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
+	parser.add_argument('--cuda', action='store_true', default=True, help='enables cuda')
+	parser.add_argument('--ngpu', type=int, default=1, help='the number of gpus')
+	parser.add_argument('--nc', type=int, default=3, help='input image channels')
+	parser.add_argument('--clamp_lower', type=float, default=-0.01)
+	parser.add_argument('--clamp_upper', type=float, default=0.01)
+	parser.add_argument('--print_freq', '-p', default=10, type=int, metavar='N', help='print frequency (default: 100)')
+	opt = parser.parse_args()
+
+	opt.cuda = True
+	cudnn.benchmark = True
 	
+	# os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
-	# ======================================= Folder of Datasets =======================================
-	# image transform & normalization
-	ImgTransform = transforms.Compose([
-			transforms.Resize((opt.imageSize, opt.imageSize)),
-			transforms.ToTensor(),
-			transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-			])
+	# ======================================== Settings of path ============================================
+	# saving path
+	opt.outf = opt.outf+'_'+opt.data_name+'_'+str(opt.basemodel)+'_'+str(opt.way_num)+'Way_'+str(opt.shot_num)+'Shot'+'_K'+str(opt.neighbor_k)
 
-	trainset = Imagefolder_csv(
-		data_dir=opt.dataset_dir, mode=opt.mode, image_size=opt.imageSize, transform=ImgTransform,
-		episode_num=opt.episode_train_num, way_num=opt.way_num, shot_num=opt.shot_num, query_num=opt.query_num
-	)
-	valset = Imagefolder_csv(
-		data_dir=opt.dataset_dir, mode='val', image_size=opt.imageSize, transform=ImgTransform,
-		episode_num=opt.episode_val_num, way_num=opt.way_num, shot_num=opt.shot_num, query_num=opt.query_num
-	)
-	testset = Imagefolder_csv(
-		data_dir=opt.dataset_dir, mode='test', image_size=opt.imageSize, transform=ImgTransform,
-		episode_num=opt.episode_test_num, way_num=opt.way_num, shot_num=opt.shot_num, query_num=opt.query_num
-	)
+	if not os.path.exists(opt.outf):
+		os.makedirs(opt.outf)
 
-	print('Trainset: %d' %len(trainset))
-	print('Valset: %d' %len(valset))
-	print('Testset: %d' %len(testset))
-	print('Trainset: %d' %len(trainset), file=F_txt)
-	print('Valset: %d' %len(valset), file=F_txt)
-	print('Testset: %d' %len(testset), file=F_txt)
+	if torch.cuda.is_available() and not opt.cuda:
+		print("WARNING: You have a CUDA device, so you should probably run with --cuda")
+
+	# save the opt and results to a txt file
+	txt_save_path = os.path.join(opt.outf, 'opt_resutls.txt')
+	F_txt = open(txt_save_path, 'a+')
+	print(opt)
+	print(opt, file=F_txt)
+
+	# ========================================== Model Config ===============================================
+	ngpu = int(opt.ngpu)
+	global best_prec1, epoch_index
+	best_prec1 = 0
+	epoch_index = 0
+
+	model = DN4Net.define_DN4Net(which_model=opt.basemodel, num_classes=opt.way_num, neighbor_k=opt.neighbor_k, norm='batch', 
+		init_type='normal', use_gpu=opt.cuda)
+
+	# define loss function (criterion) and optimizer
+	criterion = nn.CrossEntropyLoss().cuda()
+	optimizer = optim.Adam(model.parameters(), lr=opt.lr, betas=(opt.beta1, 0.9))
 
 
+	# optionally resume from a checkpoint
+	resume_epoch = 0
+	if opt.resume:
+		if os.path.isfile(opt.resume):
+			print("=> loading checkpoint '{}'".format(opt.resume))
+			checkpoint = torch.load(opt.resume)
+			epoch_index = checkpoint['epoch_index']
+			best_prec1 = checkpoint['best_prec1']
+			model.load_state_dict(checkpoint['state_dict'])
+			optimizer.load_state_dict(checkpoint['optimizer'])
+			print("=> loaded checkpoint '{}' (epoch {})".format(opt.resume, checkpoint['epoch_index']))
+			print("=> loaded checkpoint '{}' (epoch {})".format(opt.resume, checkpoint['epoch_index']), file=F_txt)
 
-	# ========================================== Load Datasets =========================================
-	train_loader = torch.utils.data.DataLoader(
-		trainset, batch_size=opt.episodeSize, shuffle=True, 
-		num_workers=int(opt.workers), drop_last=True, pin_memory=True
+			resume_epoch = checkpoint['epoch_index'] + 1
+		else:
+			print("=> no checkpoint found at '{}'".format(opt.resume))
+			print("=> no checkpoint found at '{}'".format(opt.resume), file=F_txt)
+
+
+	if opt.ngpu > 1:
+	# if True:
+		model = nn.DataParallel(model, range(opt.ngpu))
+
+	# print the architecture of the network
+	print(model) 
+	print(model, file=F_txt) 
+
+	# ======================================== Training phase ===============================================
+	print('\n............Start training............\n')
+	start_time = time.time()
+
+	for epoch_item in range(resume_epoch, opt.epochs):
+		
+		print('===================================== Epoch %d =====================================' %epoch_item)
+		print('===================================== Epoch %d =====================================' %epoch_item, file=F_txt)
+		adjust_learning_rate(optimizer, epoch_item, best_prec1) 
+		
+
+		# ======================================= Folder of Datasets =======================================
+		# image transform & normalization
+		ImgTransform = transforms.Compose([
+				transforms.Resize((opt.imageSize, opt.imageSize)),
+				transforms.ToTensor(),
+				transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+				])
+
+		trainset = Imagefolder_csv(
+			data_dir=opt.dataset_dir, mode=opt.mode, image_size=opt.imageSize, transform=ImgTransform,
+			episode_num=opt.episode_train_num, way_num=opt.way_num, shot_num=opt.shot_num, query_num=opt.query_num
 		)
-	val_loader = torch.utils.data.DataLoader(
-		valset, batch_size=opt.testepisodeSize, shuffle=True, 
-		num_workers=int(opt.workers), drop_last=True, pin_memory=True
-		) 
-	test_loader = torch.utils.data.DataLoader(
-		testset, batch_size=opt.testepisodeSize, shuffle=True, 
-		num_workers=int(opt.workers), drop_last=True, pin_memory=True
-		) 
+		valset = Imagefolder_csv(
+			data_dir=opt.dataset_dir, mode='val', image_size=opt.imageSize, transform=ImgTransform,
+			episode_num=opt.episode_val_num, way_num=opt.way_num, shot_num=opt.shot_num, query_num=opt.query_num
+		)
+		testset = Imagefolder_csv(
+			data_dir=opt.dataset_dir, mode='test', image_size=opt.imageSize, transform=ImgTransform,
+			episode_num=opt.episode_test_num, way_num=opt.way_num, shot_num=opt.shot_num, query_num=opt.query_num
+		)
+
+		print('Trainset: %d' %len(trainset))
+		print('Valset: %d' %len(valset))
+		print('Testset: %d' %len(testset))
+		print('Trainset: %d' %len(trainset), file=F_txt)
+		print('Valset: %d' %len(valset), file=F_txt)
+		print('Testset: %d' %len(testset), file=F_txt)
 
 
-	# ============================================ Training ===========================================
-	# Fix the parameters of Batch Normalization after 10000 episodes (1 epoch)
 
-	st_time = time.time()
-	# Train for 10000 episodes in each epoch
-	model.train()
-	train(train_loader, model, criterion, optimizer, epoch_item, F_txt)
+		# ========================================== Load Datasets =========================================
+		train_loader = torch.utils.data.DataLoader(
+			trainset, batch_size=opt.episodeSize, shuffle=True, 
+			num_workers=int(opt.workers), drop_last=True, pin_memory=True
+			)
+		val_loader = torch.utils.data.DataLoader(
+			valset, batch_size=opt.testepisodeSize, shuffle=True, 
+			num_workers=int(opt.workers), drop_last=True, pin_memory=True
+			) 
+		test_loader = torch.utils.data.DataLoader(
+			testset, batch_size=opt.testepisodeSize, shuffle=True, 
+			num_workers=int(opt.workers), drop_last=True, pin_memory=True
+			) 
 
 
-	# =========================================== Evaluation ==========================================
-	print('============ Validation on the val set ============')
-	print('============ validation on the val set ============', file=F_txt)
-	model.eval()
-	prec1, _ = validate(val_loader, model, criterion, epoch_item, best_prec1, F_txt)
+		# ============================================ Training ===========================================
+		# Fix the parameters of Batch Normalization after 10000 episodes (1 epoch)
+
+		st_time = time.time()
+		# Train for 10000 episodes in each epoch
+		model.train()
+		train(train_loader, model, criterion, optimizer, epoch_item, F_txt)
 
 
-	# record the best prec@1 and save checkpoint
-	is_best = prec1 > best_prec1
-	best_prec1 = max(prec1, best_prec1)
+		# =========================================== Evaluation ==========================================
+		print('============ Validation on the val set ============')
+		print('============ validation on the val set ============', file=F_txt)
+		model.eval()
+		prec1, _ = validate(val_loader, model, criterion, epoch_item, best_prec1, F_txt)
 
-	# save the checkpoint
-	if is_best:
+
+		# record the best prec@1 and save checkpoint
+		is_best = prec1 > best_prec1
+		best_prec1 = max(prec1, best_prec1)
+
+		# save the checkpoint
+		if is_best:
+			save_checkpoint(
+				{
+					'epoch_index': epoch_item,
+					'arch': opt.basemodel,
+					'state_dict': model.state_dict(),
+					'best_prec1': best_prec1,
+					'optimizer' : optimizer.state_dict(),
+				}, os.path.join(opt.outf, 'model_best.pth.tar'))
+
+		filename = os.path.join(opt.outf, 'epoch_%d.pth.tar' %epoch_item)
 		save_checkpoint(
-			{
-				'epoch_index': epoch_item,
-				'arch': opt.basemodel,
-				'state_dict': model.state_dict(),
-				'best_prec1': best_prec1,
-				'optimizer' : optimizer.state_dict(),
-			}, os.path.join(opt.outf, 'model_best.pth.tar'))
+		{
+			'epoch_index': epoch_item,
+			'arch': opt.basemodel,
+			'state_dict': model.state_dict(),
+			'best_prec1': best_prec1,
+			'optimizer' : optimizer.state_dict(),
+		}, filename)
 
-	filename = os.path.join(opt.outf, 'epoch_%d.pth.tar' %epoch_item)
-	save_checkpoint(
-	{
-		'epoch_index': epoch_item,
-		'arch': opt.basemodel,
-		'state_dict': model.state_dict(),
-		'best_prec1': best_prec1,
-		'optimizer' : optimizer.state_dict(),
-	}, filename)
+	F_txt.close()
+	print('............Training is end............')
 
-	
-	# Testing Prase
-	# print('============ Testing on the test set ============')
-	# print('============ Testing on the test set ============', file=F_txt)
-	# prec1, _ = validate(test_loader, model, criterion, epoch_item, best_prec1, F_txt)
-
-
-F_txt.close()
-print('............Training is end............')
-
-# ============================================ Training End ==============================================================
+	# ============================================ Training End ==============================================================
